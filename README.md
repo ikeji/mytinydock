@@ -107,8 +107,9 @@ main = xmonad $ ewmh $ docks $ def { ... }
 ### Wifi
 
 無線インタフェースが無いマシンでは自動的に非表示。電波強度は /proc/net/wireless
-から読む。SSID の表示には `iw` か `iwgetid` (wireless-tools) が必要で、
-どちらも無いと `(wifi)` と表示される。
+から読む。SSID は wireless extensions の ioctl (SIOCGIWESSID) で直接取るので
+外部ツール不要。それが使えない環境では `iw` → `iwgetid` の順にフォールバックし、
+どれもダメならインタフェース名を表示する。
 
 ### Volume
 

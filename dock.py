@@ -12,13 +12,17 @@ pydock — X11 の画面端に常駐する gkrellm 風ステータスモニタ(w
   - 新しいモニタを足すには Monitor を継承したクラスを書く(README.md 参照)
 """
 
+import array
 import collections
 import ctypes
 import ctypes.util
+import fcntl
 import glob
 import os
 import re
 import signal
+import socket
+import struct
 import subprocess
 import time
 
@@ -484,8 +488,28 @@ class Wifi(Monitor):
             return p.split("/")[4]
         return None
 
+    SIOCGIWESSID = 0x8B1B  # wireless extensions: get ESSID
+
     def _get_ssid(self):
-        # iw → iwgetid の順で試す。どちらも無ければ電波強度だけ表示
+        # 1) wireless extensions の ioctl。外部ツール不要で、
+        #    /proc/net/wireless が読める環境なら大抵これで取れる
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                buf = array.array("b", b"\0" * 33)
+                ptr, _ = buf.buffer_info()
+                # struct iwreq: char ifrn_name[16] + struct iw_point
+                # { void *pointer; u16 length; u16 flags; }
+                req = struct.pack("16sPHH", self.iface.encode(), ptr, 33, 0)
+                fcntl.ioctl(s.fileno(), self.SIOCGIWESSID, req)
+                ssid = buf.tobytes().rstrip(b"\0").decode("utf-8", "replace")
+                if ssid:
+                    return ssid
+            finally:
+                s.close()
+        except OSError:
+            pass
+        # 2) フォールバック: iw → iwgetid
         for cmd in (["iw", "dev", self.iface, "link"],
                     ["iwgetid", "-r", self.iface]):
             try:
@@ -500,7 +524,7 @@ class Wifi(Monitor):
                     return ""
             elif out.strip():
                 return out.strip()
-        return "(wifi)"  # SSID 取得手段なし。README 参照
+        return self.iface  # SSID が取れなければせめて IF 名を表示
 
     def tick(self):
         self.quality = 0.0
