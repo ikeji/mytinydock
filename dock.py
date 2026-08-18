@@ -484,9 +484,14 @@ class Wifi(Monitor):
         self.level = 0
 
     def _detect(self):
-        for p in sorted(glob.glob("/sys/class/net/*/wireless")):
-            return p.split("/")[4]
-        return None
+        # /sys/class/net/<if>/wireless はカーネルが無線 IF にだけ作るので、
+        # この glob にマッチするのは wifi のみ。複数あれば up のものを優先
+        cands = [os.path.basename(os.path.dirname(p))
+                 for p in sorted(glob.glob("/sys/class/net/*/wireless"))]
+        for iface in cands:
+            if read_file(f"/sys/class/net/{iface}/operstate").strip() == "up":
+                return iface
+        return cands[0] if cands else None
 
     SIOCGIWESSID = 0x8B1B  # wireless extensions: get ESSID
 
