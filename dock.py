@@ -13,6 +13,8 @@ pydock — X11 の画面端に常駐する gkrellm 風ステータスモニタ(w
 """
 
 import collections
+import ctypes
+import ctypes.util
 import glob
 import os
 import re
@@ -160,6 +162,89 @@ class History:
         return max(d) if d else 0.0
 
 # ======================================================================
+# X11 プロパティ読み取りヘルパ (EWMH 用)
+# ======================================================================
+
+class XProps:
+    """ctypes 経由で libX11 を叩いてウィンドウプロパティ (EWMH) を読む。
+    Gdk.property_get は PyGObject から呼べない (introspection 非対応) ため。"""
+    _inst = None
+
+    @classmethod
+    def instance(cls):
+        if cls._inst is None:
+            cls._inst = cls()
+        return cls._inst
+
+    def __init__(self):
+        self.dpy = None
+        path = ctypes.util.find_library("X11")
+        if not path:
+            return
+        x = ctypes.cdll.LoadLibrary(path)
+        x.XOpenDisplay.argtypes = [ctypes.c_char_p]
+        x.XOpenDisplay.restype = ctypes.c_void_p
+        dpy = x.XOpenDisplay(None)
+        if not dpy:
+            return
+        # 消えたウィンドウへの問い合わせ (BadWindow) でプロセスが落ちないように
+        # エラーハンドラを黙らせる。参照を保持しないと GC で SEGV するので注意
+        self._err_cb = ctypes.CFUNCTYPE(
+            ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)(lambda d, e: 0)
+        x.XSetErrorHandler(self._err_cb)
+        x.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+        x.XInternAtom.restype = ctypes.c_ulong
+        x.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+        x.XDefaultRootWindow.restype = ctypes.c_ulong
+        x.XGetWindowProperty.argtypes = [
+            ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong,
+            ctypes.c_long, ctypes.c_long, ctypes.c_int, ctypes.c_ulong,
+            ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_ulong),
+            ctypes.POINTER(ctypes.c_void_p)]
+        x.XFree.argtypes = [ctypes.c_void_p]
+        self.x = x
+        self.dpy = dpy
+        self.root = x.XDefaultRootWindow(dpy)
+        self._atoms = {}
+
+    def ok(self):
+        return self.dpy is not None
+
+    def _atom(self, name):
+        if name not in self._atoms:
+            self._atoms[name] = self.x.XInternAtom(self.dpy, name.encode(), False)
+        return self._atoms[name]
+
+    def get(self, win, prop):
+        """プロパティを読む。format 32 なら int リスト、format 8 なら bytes。
+        取れなければ None。"""
+        if not self.dpy:
+            return None
+        atype = ctypes.c_ulong()
+        afmt = ctypes.c_int()
+        nitems = ctypes.c_ulong()
+        after = ctypes.c_ulong()
+        data = ctypes.c_void_p()
+        r = self.x.XGetWindowProperty(
+            self.dpy, win, self._atom(prop), 0, 4096, False,
+            0,  # AnyPropertyType
+            ctypes.byref(atype), ctypes.byref(afmt), ctypes.byref(nitems),
+            ctypes.byref(after), ctypes.byref(data))
+        if r != 0 or not data.value or nitems.value == 0:
+            if data.value:
+                self.x.XFree(data)
+            return None
+        try:
+            n = nitems.value
+            if afmt.value == 32:
+                arr = ctypes.cast(data, ctypes.POINTER(ctypes.c_ulong))
+                return [arr[i] for i in range(n)]
+            return ctypes.string_at(data, n)
+        finally:
+            self.x.XFree(data)
+
+# ======================================================================
 # モニタ基底クラス
 # ======================================================================
 
@@ -170,6 +255,8 @@ class Monitor:
     available : False にすると表示されない(ハードが無い場合など)
     tick()    : UPDATE_MS ごとに呼ばれる。/proc などを読んで状態を更新する
     draw(cr, w, h) : パネル内部 (0,0)-(w,h) に cairo で描画する
+    on_click(ev)   : パネル内のクリック。処理したら True を返す
+    on_scroll(dir) : パネル上のホイール (+1=上 / -1=下)。処理したら True を返す
     """
     height = 40
     available = True
@@ -179,6 +266,12 @@ class Monitor:
 
     def draw(self, cr, w, h):
         pass
+
+    def on_click(self, ev):
+        return False
+
+    def on_scroll(self, direction):
+        return False
 
 # ======================================================================
 # 各モニタの実装
@@ -201,6 +294,66 @@ class Clock(Monitor):
         mm = rem // 60
         s = f"up {d}d{hh:02}:{mm:02}" if d else f"up {hh:02}:{mm:02}"
         draw_text(cr, s, 0, 39, size=7, color=COL_LABEL, align="center", width=w)
+
+
+class Workspaces(Monitor):
+    """xmonad のワークスペース状態 (EWMH 経由)。
+    塗り = 現在、枠 = ウィンドウあり、暗 = 空。
+    xmonad 側で XMonad.Hooks.EwmhDesktops の ewmh を有効にしておくこと。"""
+    CELL_H = 14
+    COLS = 3
+
+    def __init__(self):
+        self.xp = XProps.instance()
+        self.names = []
+        self.current = -1
+        self.occupied = set()
+        self.available = self.xp.ok()
+        if self.available:
+            self.tick()
+        rows = max(1, -(-max(len(self.names), 1) // self.COLS))  # 切り上げ
+        self.height = rows * self.CELL_H + 6
+
+    def tick(self):
+        raw = self.xp.get(self.xp.root, "_NET_DESKTOP_NAMES")
+        self.names = ([s.decode("utf-8", "replace")
+                       for s in raw.split(b"\0") if s] if raw else [])
+        cur = self.xp.get(self.xp.root, "_NET_CURRENT_DESKTOP")
+        self.current = cur[0] if cur else -1
+        occ = set()
+        for w in (self.xp.get(self.xp.root, "_NET_CLIENT_LIST") or []):
+            d = self.xp.get(w, "_NET_WM_DESKTOP")
+            if d:
+                occ.add(d[0])  # sticky (0xFFFFFFFF) はどのセルにも一致しない
+        self.occupied = occ
+
+    def draw(self, cr, w, h):
+        if not self.names:
+            # xmonad の設定に EwmhDesktops が入っていないと名前が取れない
+            draw_text(cr, "no EWMH", 0, 12, size=8, color=COL_LABEL,
+                      align="center", width=w)
+            return
+        cw = (w - 4) / self.COLS
+        for i, name in enumerate(self.names):
+            x = 2 + (i % self.COLS) * cw
+            y = 3 + (i // self.COLS) * self.CELL_H
+            label = name[:3]
+            if i == self.current:
+                cr.set_source_rgb(*COL_BAR)
+                cr.rectangle(x, y, cw - 1, self.CELL_H - 2)
+                cr.fill()
+                draw_text(cr, label, x, y + 10, size=8, color=COL_GRAPH_BG,
+                          bold=True, align="center", width=cw - 1)
+            elif i in self.occupied:
+                cr.set_source_rgb(*COL_BORDER)
+                cr.set_line_width(1)
+                cr.rectangle(x + 0.5, y + 0.5, cw - 2, self.CELL_H - 3)
+                cr.stroke()
+                draw_text(cr, label, x, y + 10, size=8, color=COL_TEXT,
+                          align="center", width=cw - 1)
+            else:
+                draw_text(cr, label, x, y + 10, size=8, color=COL_LABEL,
+                          align="center", width=cw - 1)
 
 
 class Cpu(Monitor):
@@ -313,6 +466,65 @@ class Net(Monitor):
         draw_text(cr, self.iface or "all", 2, 56, size=7, color=COL_LABEL)
         draw_text(cr, f"↑{fmt_size(self.tx)}", 0, 56, size=8, color=COL_GRAPH2,
                   align="right", width=w - 2)
+
+
+class Wifi(Monitor):
+    """接続中の Wi-Fi (SSID + 電波強度)。無線 IF が無いマシンでは非表示。"""
+    height = 42
+
+    def __init__(self, iface=None):
+        self.iface = iface or self._detect()
+        self.available = bool(self.iface)
+        self.ssid = ""
+        self.quality = 0.0
+        self.level = 0
+
+    def _detect(self):
+        for p in sorted(glob.glob("/sys/class/net/*/wireless")):
+            return p.split("/")[4]
+        return None
+
+    def _get_ssid(self):
+        # iw → iwgetid の順で試す。どちらも無ければ電波強度だけ表示
+        for cmd in (["iw", "dev", self.iface, "link"],
+                    ["iwgetid", "-r", self.iface]):
+            try:
+                out = subprocess.run(cmd, capture_output=True, text=True).stdout
+            except FileNotFoundError:
+                continue
+            if cmd[0] == "iw":
+                m = re.search(r"^\s*SSID: (.+)$", out, re.M)
+                if m:
+                    return m.group(1)
+                if "Not connected" in out:
+                    return ""
+            elif out.strip():
+                return out.strip()
+        return "(wifi)"  # SSID 取得手段なし。README 参照
+
+    def tick(self):
+        self.quality = 0.0
+        self.level = 0
+        for line in read_file("/proc/net/wireless").splitlines()[2:]:
+            f = line.split()
+            if f and f[0].rstrip(":") == self.iface:
+                self.quality = float(f[2].rstrip(".")) / 70.0  # link quality
+                self.level = int(float(f[3].rstrip(".")))      # dBm
+        self.ssid = self._get_ssid() if self.quality > 0 else ""
+
+    def draw(self, cr, w, h):
+        draw_text(cr, "WIFI", 2, 10, size=8, color=COL_LABEL)
+        if self.ssid:
+            if self.level:
+                draw_text(cr, f"{self.level}dBm", 0, 10, size=8,
+                          align="right", width=w - 2)
+            draw_text(cr, self.ssid[:10], 0, 23, size=8,
+                      align="center", width=w)
+            draw_bar(cr, 2, 27, w - 4, 8, self.quality,
+                     color=COL_BAR_HI if self.quality < 0.3 else COL_BAR)
+        else:
+            draw_text(cr, "not conn", 0, 23, size=8, color=COL_LABEL,
+                      align="center", width=w)
 
 
 class Disk(Monitor):
@@ -428,6 +640,72 @@ class Battery(Monitor):
         draw_bar(cr, 2, 14, w - 4, 9, self.cap / 100.0,
                  color=COL_BAR_HI if self.cap < 15 and not self.charging else COL_BAR)
 
+class Volume(Monitor):
+    """サウンド音量 (PipeWire の wpctl 優先、PulseAudio の pactl にフォールバック)。
+    左クリック = ミュート切替、ホイール = 音量上下。"""
+    height = 28
+    STEP = 5  # ホイール 1 目盛りで動かす %
+
+    def __init__(self):
+        self.backend = None
+        for name, probe in (("wpctl", ["wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"]),
+                            ("pactl", ["pactl", "get-sink-volume", "@DEFAULT_SINK@"])):
+            try:
+                if subprocess.run(probe, capture_output=True).returncode == 0:
+                    self.backend = name
+                    break
+            except FileNotFoundError:
+                pass
+        self.available = self.backend is not None
+        self.vol = 0
+        self.muted = False
+
+    def _run(self, *args):
+        return subprocess.run(args, capture_output=True, text=True).stdout
+
+    def tick(self):
+        if self.backend == "wpctl":
+            out = self._run("wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@")
+            m = re.search(r"([\d.]+)", out)
+            self.vol = round(float(m.group(1)) * 100) if m else 0
+            self.muted = "MUTED" in out
+        else:
+            out = self._run("pactl", "get-sink-volume", "@DEFAULT_SINK@")
+            m = re.search(r"(\d+)%", out)
+            self.vol = int(m.group(1)) if m else 0
+            self.muted = "yes" in self._run("pactl", "get-sink-mute", "@DEFAULT_SINK@")
+
+    def on_scroll(self, direction):
+        ud = "+" if direction > 0 else "-"
+        if self.backend == "wpctl":
+            # -l 1.0 で 100% を上限にする
+            self._run("wpctl", "set-volume", "-l", "1.0",
+                      "@DEFAULT_AUDIO_SINK@", f"{self.STEP}%{ud}")
+        else:
+            self._run("pactl", "set-sink-volume", "@DEFAULT_SINK@", f"{ud}{self.STEP}%")
+        self.tick()
+        return True
+
+    def on_click(self, ev):
+        if ev.button != 1:
+            return False
+        if self.backend == "wpctl":
+            self._run("wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "toggle")
+        else:
+            self._run("pactl", "set-sink-mute", "@DEFAULT_SINK@", "toggle")
+        self.tick()
+        return True
+
+    def draw(self, cr, w, h):
+        draw_text(cr, "VOL", 2, 10, size=8, color=COL_LABEL)
+        if self.muted:
+            draw_text(cr, "MUTE", 0, 10, size=9, color=COL_GRAPH2,
+                      align="right", width=w - 2)
+        else:
+            draw_text(cr, f"{self.vol}%", 0, 10, size=9, align="right", width=w - 2)
+        draw_bar(cr, 2, 14, w - 4, 9, self.vol / 100.0,
+                 color=COL_GRAPH2 if self.muted else COL_BAR)
+
 # ======================================================================
 # ウィンドウ本体
 # ======================================================================
@@ -457,8 +735,12 @@ class Dock(Gtk.Window):
         for m in self.monitors:
             area = Gtk.DrawingArea()
             area.set_size_request(WIDTH - 4, m.height)
-            area.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
+            area.add_events(Gdk.EventMask.BUTTON_PRESS_MASK |
+                            Gdk.EventMask.SCROLL_MASK |
+                            Gdk.EventMask.SMOOTH_SCROLL_MASK)
             area.connect("draw", self.on_draw_panel, m)
+            area.connect("button-press-event", self.on_panel_button, m)
+            area.connect("scroll-event", self.on_panel_scroll, m)
             box.pack_start(area, False, False, 0)
 
         # 背景色は CSS で指定
@@ -547,6 +829,27 @@ class Dock(Gtk.Window):
                       "apt install x11-utils)")
                 break
 
+    # ---- パネルごとのマウス操作 ----
+    def on_panel_button(self, _area, ev, monitor):
+        if monitor.on_click(ev):
+            self.queue_draw()
+            return True
+        return False  # 未処理ならウィンドウ側 (右クリックメニュー) へ
+
+    def on_panel_scroll(self, _area, ev, monitor):
+        if ev.direction == Gdk.ScrollDirection.UP:
+            d = 1
+        elif ev.direction == Gdk.ScrollDirection.DOWN:
+            d = -1
+        elif ev.direction == Gdk.ScrollDirection.SMOOTH:
+            d = -1 if ev.delta_y > 0 else 1
+        else:
+            return False
+        if monitor.on_scroll(d):
+            self.queue_draw()
+            return True
+        return False
+
     # ---- 右クリックメニュー ----
     def on_button(self, _w, ev):
         if ev.button == 3:
@@ -565,13 +868,16 @@ class Dock(Gtk.Window):
 
 MONITORS = [
     Clock(),
+    Workspaces(),   # xmonad 側で EwmhDesktops (ewmh) が必要
     Cpu(),
     Mem(),
     Net(),          # Net("eth0") のように指定も可
+    Wifi(),         # 無線 IF が無ければ自動で消える
     Disk(),
     *[Fs(p) for p in FS_PATHS],
     Temp(),         # センサが無ければ自動で消える
     Battery(),      # バッテリーが無ければ自動で消える
+    Volume(),       # 左クリック=ミュート、ホイール=音量
 ]
 
 

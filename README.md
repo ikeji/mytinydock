@@ -1,7 +1,8 @@
 # pydock
 
 X11 の画面端に常駐する gkrellm 風ステータスモニタ。wmdock 風の幅 64px の縦長パネルで、
-時計・CPU・メモリ・ネットワーク・ディスク I/O・ファイルシステム・温度・バッテリーを表示する。
+時計・xmonad ワークスペース・CPU・メモリ・ネットワーク・Wi-Fi・ディスク I/O・
+ファイルシステム・温度・バッテリー・音量を表示する。
 
 1 ファイル (`dock.py`) だけで完結していて、カスタマイズはソースを直接編集する方式。
 
@@ -23,6 +24,7 @@ sudo apt install python3-gi gir1.2-gtk-3.0 x11-utils
 ```
 
 - 右クリック → 「終了」で終了(Ctrl-C でも可)
+- 音量パネル: 左クリックでミュート切替、マウスホイールで音量上下
 - X セッション開始時に自動起動したい場合は `~/.xsessionrc` や WM の autostart に
   `~/work/desktop/dock/dock.py &` を追加する
 
@@ -86,6 +88,32 @@ class Procs(Monitor):
 
 `tick()` 内の例外は捕捉してコンソールに出すだけなので、実験中に多少壊れても
 ドック全体は落ちない。
+
+## モニタごとの補足
+
+### Workspaces (xmonad ワークスペース)
+
+EWMH 経由で読むので、xmonad 側で `XMonad.Hooks.EwmhDesktops` を有効にしておくこと:
+
+```haskell
+import XMonad.Hooks.EwmhDesktops
+main = xmonad $ ewmh $ docks $ def { ... }
+```
+
+有効でないと「no EWMH」と表示される。塗りつぶし = 現在のワークスペース、
+枠付き = ウィンドウあり、暗色 = 空。EWMH の読み取りは ctypes で libX11 を
+直接叩いているので追加パッケージは不要。
+
+### Wifi
+
+無線インタフェースが無いマシンでは自動的に非表示。電波強度は /proc/net/wireless
+から読む。SSID の表示には `iw` か `iwgetid` (wireless-tools) が必要で、
+どちらも無いと `(wifi)` と表示される。
+
+### Volume
+
+PipeWire の `wpctl` があればそれを、無ければ PulseAudio の `pactl` を使う。
+どちらも無ければ非表示。
 
 ## 既知の制限
 
