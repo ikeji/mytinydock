@@ -18,13 +18,18 @@ import ctypes
 import ctypes.util
 import fcntl
 import glob
+import json
+import math
 import os
 import re
+import shutil
 import signal
 import socket
 import struct
 import subprocess
+import threading
 import time
+import urllib.request
 
 import gi
 gi.require_version("Gtk", "3.0")
@@ -49,6 +54,7 @@ FONT = "DejaVu Sans Mono"  # 描画に使うフォントファミリ
 
 NET_IFACE = None      # ネットワークインタフェース名。None なら lo 以外を全部合算
 FS_PATHS = ["/"]      # 使用率を表示するマウントポイント
+PING_TARGET = "8.8.8.8"  # Ping モニタの宛先
 
 # 色 (R, G, B を 0.0〜1.0 で)。gkrellm っぽい暗背景 + 緑系
 COL_BG = (0.03, 0.06, 0.03)      # ウィンドウ背景
@@ -282,8 +288,8 @@ class Monitor:
 # ======================================================================
 
 class Clock(Monitor):
-    """時計 + 日付 + 稼働時間。"""
-    height = 44
+    """時計 + 日付 + 年/ISO 週 + 稼働時間。"""
+    height = 56
 
     def draw(self, cr, w, h):
         draw_text(cr, time.strftime("%H:%M:%S"), 0, 14, size=12, bold=True,
@@ -292,12 +298,64 @@ class Clock(Monitor):
         wday = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")[time.localtime().tm_wday]
         draw_text(cr, time.strftime("%m/%d ") + wday, 0, 27, size=8,
                   align="center", width=w)
+        # %G/%V は ISO 週番号 (年末年始は %Y とずれることがある)
+        draw_text(cr, time.strftime("%G W%V"), 0, 39, size=8,
+                  align="center", width=w)
         up = float(read_file("/proc/uptime").split()[0] or 0)
         d, rem = divmod(int(up), 86400)
         hh, rem = divmod(rem, 3600)
         mm = rem // 60
         s = f"up {d}d{hh:02}:{mm:02}" if d else f"up {hh:02}:{mm:02}"
-        draw_text(cr, s, 0, 39, size=7, color=COL_LABEL, align="center", width=w)
+        draw_text(cr, s, 0, 51, size=7, color=COL_LABEL, align="center", width=w)
+
+
+class Moon(Monitor):
+    """月齢。満ち欠けの形を cairo で直接描く (フォント任せだと豆腐になるため)。
+    北半球から見た向き (満ちるとき右側が光る)。"""
+    height = 36
+    SYNODIC = 29.530588853           # 朔望月 (日)
+    REF_NEW_MOON = 947182440         # 2000-01-06 18:14 UTC の新月 (epoch 秒)
+
+    def draw(self, cr, w, h):
+        age = ((time.time() - self.REF_NEW_MOON) / 86400.0) % self.SYNODIC
+        a = age / self.SYNODIC       # 0=新月, 0.5=満月
+        illum = (1 - math.cos(2 * math.pi * a)) / 2
+        cx, cy, r = 18, h / 2, 13
+
+        # 影の円 (地)
+        cr.set_source_rgb(*COL_GRAPH_BG)
+        cr.arc(cx, cy, r, 0, 2 * math.pi)
+        cr.fill()
+        # 光っている部分: 半円 + ターミネータ (楕円弧) で囲む
+        k = math.cos(2 * math.pi * a)  # +1=新月, 0=半月, -1=満月
+        cr.set_source_rgb(0.85, 0.85, 0.70)
+        if a < 0.5:  # 満ちる: 右側が光る
+            cr.arc(cx, cy, r, -math.pi / 2, math.pi / 2)
+            self._terminator(cr, cx, cy, r, -k, math.pi / 2, 3 * math.pi / 2)
+        else:        # 欠ける: 左側が光る
+            cr.arc(cx, cy, r, math.pi / 2, 3 * math.pi / 2)
+            self._terminator(cr, cx, cy, r, -k, -math.pi / 2, math.pi / 2)
+        cr.close_path()
+        cr.fill()
+        # 輪郭
+        cr.set_source_rgb(*COL_GRID)
+        cr.set_line_width(1)
+        cr.arc(cx, cy, r, 0, 2 * math.pi)
+        cr.stroke()
+
+        draw_text(cr, "MOON", 36, 10, size=7, color=COL_LABEL)
+        draw_text(cr, f"{illum * 100:3.0f}%", 36, 21, size=8)
+        draw_text(cr, f"{age:4.1f}d", 36, 32, size=8, color=COL_LABEL)
+
+    def _terminator(self, cr, cx, cy, r, kx, a0, a1):
+        """明暗境界線: 横半径 kx*r の楕円弧 (kx≈0 は直線)。"""
+        if abs(kx) < 0.01:
+            return  # ちょうど半月: arc の終点から close_path で直線になる
+        cr.save()
+        cr.translate(cx, cy)
+        cr.scale(kx, 1)
+        cr.arc(0, 0, r, a0, a1)
+        cr.restore()
 
 
 class Workspaces(Monitor):
@@ -389,6 +447,85 @@ class Cpu(Monitor):
         draw_graph(cr, 2, 14, w - 4, 30, [(self.hist, COL_GRAPH)], 100.0)
         draw_text(cr, f"load {self.load:.2f}", 0, 54, size=7, color=COL_LABEL,
                   align="center", width=w)
+
+
+class CpuFreq(Monitor):
+    """CPU クロック周波数 (全コアの最大値)。"""
+    height = 26
+
+    def __init__(self):
+        self.paths = glob.glob(
+            "/sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq")
+        self.available = bool(self.paths)
+        self.cur = 0.0
+        maxes = []
+        for p in self.paths:
+            try:
+                maxes.append(int(read_file(
+                    p.replace("scaling_cur_freq", "cpuinfo_max_freq"))))
+            except ValueError:
+                pass
+        self.hwmax = max(maxes, default=0) / 1e6  # kHz → GHz
+
+    def tick(self):
+        vals = []
+        for p in self.paths:
+            try:
+                vals.append(int(read_file(p)))
+            except ValueError:
+                pass
+        self.cur = max(vals, default=0) / 1e6
+
+    def draw(self, cr, w, h):
+        draw_text(cr, "GHZ", 2, 10, size=8, color=COL_LABEL)
+        draw_text(cr, f"{self.cur:.2f}", 0, 10, size=9, align="right", width=w - 2)
+        if self.hwmax:
+            draw_bar(cr, 2, 14, w - 4, 8, self.cur / self.hwmax, color=COL_BAR)
+
+
+class Top(Monitor):
+    """CPU を一番使っているプロセス。% は 1 コア分が 100%。"""
+    height = 26
+
+    def __init__(self):
+        self.prev = {}
+        self.t0 = None
+        self.pct = 0.0
+        self.name = ""
+        self.tck = os.sysconf("SC_CLK_TCK")
+
+    def tick(self):
+        now = time.monotonic()
+        cur = {}
+        best_delta, best_name = 0, ""
+        for pid in os.listdir("/proc"):
+            if not pid.isdigit():
+                continue
+            try:
+                with open(f"/proc/{pid}/stat") as f:
+                    line = f.read()
+                # comm は空白や ) を含みうるので、最後の ) で区切る
+                rp = line.rindex(")")
+                name = line[line.index("(") + 1:rp]
+                f2 = line[rp + 2:].split()
+                t = int(f2[11]) + int(f2[12])  # utime + stime
+            except (OSError, ValueError, IndexError):
+                continue
+            cur[pid] = t
+            if pid in self.prev:
+                d = t - self.prev[pid]
+                if d > best_delta:
+                    best_delta, best_name = d, name
+        if self.t0 is not None and now > self.t0:
+            self.pct = 100.0 * best_delta / self.tck / (now - self.t0)
+            self.name = best_name
+        self.prev = cur
+        self.t0 = now
+
+    def draw(self, cr, w, h):
+        draw_text(cr, "TOP", 2, 10, size=8, color=COL_LABEL)
+        draw_text(cr, f"{self.pct:3.0f}%", 0, 10, size=9, align="right", width=w - 2)
+        draw_text(cr, self.name[:11], 0, 22, size=7, align="center", width=w)
 
 
 class Mem(Monitor):
@@ -556,6 +693,104 @@ class Wifi(Monitor):
                       align="center", width=w)
 
 
+class Ping(Monitor):
+    """PING_TARGET への RTT グラフ。ping は非同期に走らせ、次の tick で回収。"""
+    height = 42
+
+    def __init__(self, target=None):
+        self.target = target or PING_TARGET
+        self.available = bool(shutil.which("ping"))
+        self.hist = History()
+        self.rtt = None
+        self.proc = None
+
+    def tick(self):
+        if self.proc is not None:
+            if self.proc.poll() is None:  # -W 1 なので普通はここに来ない
+                self.proc.kill()
+                self.rtt = None
+            else:
+                m = re.search(r"time=([\d.]+)", self.proc.stdout.read())
+                self.rtt = float(m.group(1)) if m else None
+            self.hist.push(self.rtt or 0.0)
+            self.proc = None
+        self.proc = subprocess.Popen(
+            ["ping", "-n", "-c", "1", "-W", "1", self.target],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+
+    def draw(self, cr, w, h):
+        draw_text(cr, "PING", 2, 10, size=8, color=COL_LABEL)
+        txt = f"{self.rtt:.0f}ms" if self.rtt is not None else "--"
+        draw_text(cr, txt, 0, 10, size=8,
+                  color=COL_TEXT if self.rtt is not None else COL_BAR_HI,
+                  align="right", width=w - 2)
+        vmax = max(self.hist.max_of(w), 20.0)  # 最低 20ms スケール
+        draw_graph(cr, 2, 14, w - 4, 24, [(self.hist, COL_GRAPH)], vmax)
+
+
+class Tailscale(Monitor):
+    """Tailscale の状態と自機の Tailscale IP。10 秒ごとに更新。"""
+    height = 34
+    INTERVAL = 10
+
+    def __init__(self):
+        self.available = bool(shutil.which("tailscale"))
+        self.state = "?"
+        self.ip = ""
+        self.last = -1e9
+
+    def tick(self):
+        if time.monotonic() - self.last < self.INTERVAL:
+            return
+        self.last = time.monotonic()
+        try:
+            out = subprocess.run(["tailscale", "status", "--json"],
+                                 capture_output=True, text=True, timeout=3).stdout
+            j = json.loads(out or "{}")
+            self.state = j.get("BackendState", "?")
+            self.ip = next((i for i in j.get("TailscaleIPs") or [] if "." in i), "")
+        except (subprocess.TimeoutExpired, json.JSONDecodeError):
+            self.state = "err"
+
+    def draw(self, cr, w, h):
+        draw_text(cr, "TS", 2, 10, size=8, color=COL_LABEL)
+        ok = self.state == "Running"
+        draw_text(cr, "up" if ok else self.state[:7].lower(), 0, 10, size=8,
+                  color=COL_GRAPH if ok else COL_GRAPH2, align="right", width=w - 2)
+        draw_text(cr, self.ip, 0, 26, size=7, align="center", width=w)
+
+
+class GlobalIp(Monitor):
+    """グローバル IP。10 分ごとに api.ipify.org からスレッドで取得。"""
+    height = 24
+    INTERVAL = 600
+    URL = "https://api.ipify.org"
+
+    def __init__(self):
+        self.ip = "..."
+        self.last = -1e9
+        self.thread = None
+
+    def tick(self):
+        if self.thread and not self.thread.is_alive():
+            self.thread = None
+        if not self.thread and time.monotonic() - self.last > self.INTERVAL:
+            self.last = time.monotonic()
+            self.thread = threading.Thread(target=self._fetch, daemon=True)
+            self.thread.start()
+
+    def _fetch(self):
+        try:
+            self.ip = urllib.request.urlopen(self.URL, timeout=10) \
+                .read().decode().strip()
+        except OSError:
+            self.ip = "n/a"
+
+    def draw(self, cr, w, h):
+        draw_text(cr, "GIP", 2, 10, size=8, color=COL_LABEL)
+        draw_text(cr, self.ip, 0, 20, size=7, align="center", width=w)
+
+
 class Disk(Monitor):
     """ディスク I/O のグラフ(緑=読み込み、橙=書き込み)。物理ディスクを合算。"""
     height = 60
@@ -647,6 +882,30 @@ class Temp(Monitor):
                  color=COL_BAR_HI if self.temp > 80 else COL_BAR)
 
 
+class Fan(Monitor):
+    """ファン回転数 (/sys/class/hwmon の最大値)。センサが無ければ非表示。"""
+    height = 24
+
+    def __init__(self):
+        self.paths = glob.glob("/sys/class/hwmon/hwmon*/fan*_input")
+        self.available = bool(self.paths)
+        self.rpm = 0
+
+    def tick(self):
+        vals = []
+        for p in self.paths:
+            try:
+                vals.append(int(read_file(p)))
+            except ValueError:
+                pass
+        self.rpm = max(vals, default=0)
+
+    def draw(self, cr, w, h):
+        draw_text(cr, "FAN", 2, 10, size=8, color=COL_LABEL)
+        draw_text(cr, f"{self.rpm}rpm" if self.rpm else "stop", 0, 10, size=8,
+                  align="right", width=w - 2)
+
+
 class Battery(Monitor):
     """バッテリー残量。バッテリーが無いマシンでは非表示。"""
     height = 28
@@ -671,9 +930,9 @@ class Battery(Monitor):
 
 class Volume(Monitor):
     """サウンド音量 (PipeWire の wpctl 優先、PulseAudio の pactl にフォールバック)。
-    左クリック = ミュート切替、ホイール = 音量上下。"""
-    height = 28
-    STEP = 5  # ホイール 1 目盛りで動かす %
+    [-][M][+] ボタン、バーをクリックで直接指定、ホイールでも上下。"""
+    height = 44
+    STEP = 5  # ボタン/ホイール 1 回で動かす %
 
     def __init__(self):
         self.backend = None
@@ -704,8 +963,7 @@ class Volume(Monitor):
             self.vol = int(m.group(1)) if m else 0
             self.muted = "yes" in self._run("pactl", "get-sink-mute", "@DEFAULT_SINK@")
 
-    def on_scroll(self, direction):
-        ud = "+" if direction > 0 else "-"
+    def _change(self, ud):
         if self.backend == "wpctl":
             # -l 1.0 で 100% を上限にする
             self._run("wpctl", "set-volume", "-l", "1.0",
@@ -713,16 +971,50 @@ class Volume(Monitor):
         else:
             self._run("pactl", "set-sink-volume", "@DEFAULT_SINK@", f"{ud}{self.STEP}%")
         self.tick()
-        return True
 
-    def on_click(self, ev):
-        if ev.button != 1:
-            return False
+    def _set_pct(self, pct):
+        pct = max(0, min(100, round(pct)))
+        if self.backend == "wpctl":
+            self._run("wpctl", "set-volume", "-l", "1.0",
+                      "@DEFAULT_AUDIO_SINK@", f"{pct}%")
+        else:
+            self._run("pactl", "set-sink-volume", "@DEFAULT_SINK@", f"{pct}%")
+        self.tick()
+
+    def _toggle_mute(self):
         if self.backend == "wpctl":
             self._run("wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "toggle")
         else:
             self._run("pactl", "set-sink-mute", "@DEFAULT_SINK@", "toggle")
         self.tick()
+
+    def on_scroll(self, direction):
+        self._change("+" if direction > 0 else "-")
+        return True
+
+    def _btn_rects(self, w):
+        bw = (w - 4) / 3
+        return [("-", 2, 27, bw, 14),
+                ("M", 2 + bw, 27, bw, 14),
+                ("+", 2 + 2 * bw, 27, bw, 14)]
+
+    def on_click(self, ev):
+        if ev.button != 1:
+            return False
+        w = ev.window.get_width()
+        for name, x, y, bw, bh in self._btn_rects(w):
+            if x <= ev.x < x + bw and y <= ev.y < y + bh:
+                if name == "-":
+                    self._change("-")
+                elif name == "+":
+                    self._change("+")
+                else:
+                    self._toggle_mute()
+                return True
+        if 14 <= ev.y < 25:  # バーをクリック → その位置の音量に設定
+            self._set_pct((ev.x - 2) / (w - 4) * 100)
+            return True
+        self._toggle_mute()  # それ以外 (ラベル行など) はミュート切替
         return True
 
     def draw(self, cr, w, h):
@@ -734,6 +1026,135 @@ class Volume(Monitor):
             draw_text(cr, f"{self.vol}%", 0, 10, size=9, align="right", width=w - 2)
         draw_bar(cr, 2, 14, w - 4, 9, self.vol / 100.0,
                  color=COL_GRAPH2 if self.muted else COL_BAR)
+        for name, x, y, bw, bh in self._btn_rects(w):
+            if name == "M" and self.muted:
+                cr.set_source_rgba(*COL_GRAPH2, 0.35)
+                cr.rectangle(x, y, bw, bh)
+                cr.fill()
+            cr.set_source_rgb(*COL_BORDER)
+            cr.set_line_width(1)
+            cr.rectangle(x + 0.5, y + 0.5, bw - 1, bh - 1)
+            cr.stroke()
+            draw_text(cr, name, x, y + 11, size=9, bold=(name != "M"),
+                      align="center", width=bw)
+
+
+class Player(Monitor):
+    """メディアプレイヤー (playerctl 経由)。クリックで再生/一時停止。
+    長いタイトルは 1 秒ごとに横スクロール。"""
+    height = 30
+
+    def __init__(self):
+        self.available = bool(shutil.which("playerctl"))
+        self.status = ""
+        self.title = ""
+        self.off = 0
+
+    def tick(self):
+        r = subprocess.run(["playerctl", "status"], capture_output=True, text=True)
+        self.status = r.stdout.strip() if r.returncode == 0 else ""
+        if self.status:
+            self.title = subprocess.run(
+                ["playerctl", "metadata", "--format", "{{artist}} - {{title}}"],
+                capture_output=True, text=True).stdout.strip()
+        else:
+            self.title = ""
+        self.off += 1
+
+    def on_click(self, ev):
+        if ev.button != 1 or not self.status:
+            return False
+        subprocess.run(["playerctl", "play-pause"], capture_output=True)
+        self.tick()
+        return True
+
+    def draw(self, cr, w, h):
+        icon = {"Playing": ">", "Paused": "||"}.get(self.status, "--")
+        draw_text(cr, icon, 2, 10, size=9, bold=True,
+                  color=COL_GRAPH if self.status == "Playing" else COL_LABEL)
+        draw_text(cr, "MUSIC", 0, 10, size=7, color=COL_LABEL,
+                  align="right", width=w - 2)
+        n = 11  # 表示できる文字数
+        s = self.title
+        if len(s) > n:  # マーキー表示
+            s2 = s + "   "
+            i = self.off % len(s2)
+            s = (s2 + s2)[i:i + n]
+        draw_text(cr, s or "no player", 0, 24, size=7,
+                  color=COL_TEXT if s else COL_LABEL, align="center", width=w)
+
+
+class Ime(Monitor):
+    """IME の状態 (fcitx5/fcitx/ibus)。クリックでオンオフ切替 (fcitx のみ)。"""
+    height = 24
+
+    def __init__(self):
+        self.cmd = next((c for c in ("fcitx5-remote", "fcitx-remote")
+                         if shutil.which(c)), None)
+        self.ibus = shutil.which("ibus") if not self.cmd else None
+        self.available = bool(self.cmd or self.ibus)
+        self.active = False
+        self.name = ""
+
+    def tick(self):
+        if self.cmd:
+            st = subprocess.run([self.cmd], capture_output=True, text=True) \
+                .stdout.strip()
+            self.active = st == "2"
+            self.name = subprocess.run([self.cmd, "-n"], capture_output=True,
+                                       text=True).stdout.strip()
+        else:
+            self.name = subprocess.run(["ibus", "engine"], capture_output=True,
+                                       text=True).stdout.strip()
+            self.active = not self.name.startswith("xkb:")
+
+    def on_click(self, ev):
+        if ev.button != 1 or not self.cmd:
+            return False
+        subprocess.run([self.cmd, "-t"], capture_output=True)
+        self.tick()
+        return True
+
+    def draw(self, cr, w, h):
+        draw_text(cr, "IME", 2, 10, size=8, color=COL_LABEL)
+        name = re.sub(r"^(keyboard-|xkb:)", "", self.name)[:8] or "?"
+        draw_text(cr, name, 0, 10, size=8, bold=self.active,
+                  color=COL_GRAPH if self.active else COL_LABEL,
+                  align="right", width=w - 2)
+
+
+class Apt(Monitor):
+    """apt の更新可能パッケージ数。10 分ごとに非同期でチェック。"""
+    height = 24
+    INTERVAL = 600
+
+    def __init__(self):
+        self.available = bool(shutil.which("apt"))
+        self.count = -1
+        self.proc = None
+        self.last = -1e9
+
+    def tick(self):
+        if self.proc is not None:
+            if self.proc.poll() is not None:
+                out = self.proc.stdout.read()
+                # "pkg/suite version arch [upgradable from ...]" 形式の行を数える
+                self.count = sum(1 for l in out.splitlines() if "/" in l)
+                self.proc = None
+        elif time.monotonic() - self.last > self.INTERVAL:
+            self.last = time.monotonic()
+            self.proc = subprocess.Popen(
+                ["apt", "list", "--upgradable"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+
+    def draw(self, cr, w, h):
+        draw_text(cr, "APT", 2, 10, size=8, color=COL_LABEL)
+        if self.count < 0:
+            draw_text(cr, "...", 0, 10, size=9, align="right", width=w - 2)
+        else:
+            draw_text(cr, str(self.count), 0, 10, size=9, bold=self.count > 0,
+                      color=COL_GRAPH2 if self.count > 0 else COL_TEXT,
+                      align="right", width=w - 2)
 
 # ======================================================================
 # ウィンドウ本体
@@ -896,17 +1317,27 @@ class Dock(Gtk.Window):
 # ======================================================================
 
 MONITORS = [
-    Clock(),
+    Clock(),        # 時刻 / 日付 / ISO 週 / 稼働時間
+    Moon(),         # 月齢
     Workspaces(),   # xmonad 側で EwmhDesktops (ewmh) が必要
     Cpu(),
+    CpuFreq(),      # cpufreq が無ければ自動で消える
+    Top(),          # CPU を一番使っているプロセス
     Mem(),
     Net(),          # Net("eth0") のように指定も可
     Wifi(),         # 無線 IF が無ければ自動で消える
+    Ping(),         # 宛先は PING_TARGET (Ping("192.168.1.1") でも可)
+    Tailscale(),    # tailscale コマンドが無ければ自動で消える
+    GlobalIp(),     # 10 分ごとに api.ipify.org へ問い合わせ
     Disk(),
     *[Fs(p) for p in FS_PATHS],
     Temp(),         # センサが無ければ自動で消える
+    Fan(),          # ファンセンサが無ければ自動で消える
     Battery(),      # バッテリーが無ければ自動で消える
-    Volume(),       # 左クリック=ミュート、ホイール=音量
+    Volume(),       # [-][M][+] ボタン、バークリックで直接指定、ホイール可
+    Player(),       # playerctl が無ければ自動で消える。クリックで再生/停止
+    Ime(),          # fcitx/ibus が無ければ自動で消える。クリックで切替
+    Apt(),          # 更新可能パッケージ数 (10 分ごと)
 ]
 
 

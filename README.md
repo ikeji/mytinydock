@@ -1,8 +1,10 @@
 # pydock
 
 X11 の画面端に常駐する gkrellm 風ステータスモニタ。wmdock 風の幅 64px の縦長パネルで、
-時計・xmonad ワークスペース・CPU・メモリ・ネットワーク・Wi-Fi・ディスク I/O・
-ファイルシステム・温度・バッテリー・音量を表示する。
+時計 (ISO 週付き)・月齢・xmonad ワークスペース・CPU (使用率/クロック/Top プロセス)・
+メモリ・ネットワーク・Wi-Fi・Ping・Tailscale・グローバル IP・ディスク I/O・
+ファイルシステム・温度・ファン・バッテリー・音量・メディアプレイヤー・IME・
+APT 更新数を表示する。
 
 1 ファイル (`dock.py`) だけで完結していて、カスタマイズはソースを直接編集する方式。
 
@@ -24,7 +26,10 @@ sudo apt install python3-gi gir1.2-gtk-3.0 x11-utils
 ```
 
 - 右クリック → 「終了」で終了(Ctrl-C でも可)
-- 音量パネル: 左クリックでミュート切替、マウスホイールで音量上下
+- 音量パネル: [-][M][+] ボタン、バーをクリックでその位置の音量に設定、
+  ホイールで上下、それ以外の場所のクリックでミュート切替
+- メディアパネル: クリックで再生/一時停止
+- IME パネル: クリックでオンオフ切替 (fcitx のみ)
 - X セッション開始時に自動起動したい場合は `~/.xsessionrc` や WM の autostart に
   `~/work/desktop/dock/dock.py &` を追加する
 
@@ -115,6 +120,31 @@ main = xmonad $ ewmh $ docks $ def { ... }
 
 PipeWire の `wpctl` があればそれを、無ければ PulseAudio の `pactl` を使う。
 どちらも無ければ非表示。
+
+### Moon (月齢)
+
+2000-01-06 の新月を基準に朔望月 (29.53 日) で計算する近似 (誤差 ±1 日程度)。
+満ち欠けの形は cairo で直接描く。北半球から見た向き。
+
+### Ping
+
+宛先は先頭の `PING_TARGET` で変更 (`Ping("192.168.1.1")` の個別指定も可)。
+ping は非同期に走らせて次の tick で回収するので GUI は固まらない。
+
+### Tailscale / GlobalIp / Apt
+
+外部コマンドや通信が絡むものは間隔を空けて実行する:
+Tailscale は 10 秒ごと、GlobalIp (api.ipify.org) と Apt は 10 分ごと。
+GlobalIp は外部サービスに HTTP アクセスする点に注意 (不要なら MONITORS から外す)。
+
+### Player / Ime
+
+Player は `playerctl`、Ime は `fcitx5-remote` / `fcitx-remote` / `ibus` が必要。
+無ければ自動で非表示。長い曲名は 1 秒ごとに横スクロールする。
+
+### Top
+
+% は 1 コア分を 100% とした値 (マルチコアで張り付くと 100% を超える)。
 
 ## 既知の制限
 
