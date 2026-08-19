@@ -1164,6 +1164,7 @@ class Dock(Gtk.Window):
     def __init__(self, monitors):
         super().__init__(title="pydock")
         self.monitors = [m for m in monitors if m.available]
+        self._drop_overflow()
 
         # wmdock 風: 枠なし、タスクバーに出ない、全ワークスペースに表示、DOCK 扱い
         self.set_decorated(False)
@@ -1206,6 +1207,28 @@ class Dock(Gtk.Window):
 
         GLib.timeout_add(UPDATE_MS, self.on_tick)
         self.on_tick()
+
+    def _drop_overflow(self):
+        """画面の縦幅に収まらないパネルは中途半端に切れないよう丸ごと非表示に。
+        並び順は保ちつつ、入るものは後ろからでも詰める (背の高いパネルが
+        入らなくても、その後ろの小さいパネルは表示される)。"""
+        display = Gdk.Display.get_default()
+        gmon = display.get_primary_monitor() or display.get_monitor(0)
+        avail_h = gmon.get_geometry().height
+        used = 4  # 上下マージン
+        fits, dropped = [], []
+        for m in self.monitors:
+            need = m.height + (2 if fits else 0)  # パネル間 spacing
+            if used + need <= avail_h:
+                fits.append(m)
+                used += need
+            else:
+                dropped.append(type(m).__name__)
+        if dropped:
+            print("pydock: 画面 (縦%dpx) に収まらないため非表示: %s\n"
+                  "        (MONITORS の並びで前にあるものが優先されます)"
+                  % (avail_h, ", ".join(dropped)))
+        self.monitors = fits
 
     # ---- 更新 ----
     def on_tick(self):
@@ -1320,6 +1343,7 @@ MONITORS = [
     Clock(),        # 時刻 / 日付 / ISO 週 / 稼働時間
     Moon(),         # 月齢
     Workspaces(),   # xmonad 側で EwmhDesktops (ewmh) が必要
+    Ime(),          # fcitx/ibus が無ければ自動で消える。クリックで切替
     Cpu(),
     CpuFreq(),      # cpufreq が無ければ自動で消える
     Top(),          # CPU を一番使っているプロセス
@@ -1336,7 +1360,6 @@ MONITORS = [
     Battery(),      # バッテリーが無ければ自動で消える
     Volume(),       # [-][M][+] ボタン、バークリックで直接指定、ホイール可
     Player(),       # playerctl が無ければ自動で消える。クリックで再生/停止
-    Ime(),          # fcitx/ibus が無ければ自動で消える。クリックで切替
     Apt(),          # 更新可能パッケージ数 (10 分ごと)
 ]
 
