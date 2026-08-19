@@ -1360,10 +1360,10 @@ MONITORS = [
     Clock(),        # 時刻 / 日付 / ISO 週 / 稼働時間
     Moon(),         # 月齢
     Workspaces(),   # xmonad 側で EwmhDesktops (ewmh) が必要
-    Ime(),          # fcitx/ibus が無ければ自動で消える。クリックで切替
+    # Ime(),        # IME 状態。クリックで切替
     Cpu(),
-    CpuFreq(),      # cpufreq が無ければ自動で消える
-    Top(),          # CPU を一番使っているプロセス
+    # CpuFreq(),    # CPU クロック
+    # Top(),        # CPU を一番使っているプロセス
     Mem(),
     Net(),          # Net("eth0") のように指定も可
     Wifi(),         # 無線 IF が無ければ自動で消える
@@ -1373,11 +1373,11 @@ MONITORS = [
     Disk(),
     *[Fs(p) for p in FS_PATHS],
     Temp(),         # センサが無ければ自動で消える
-    Fan(),          # ファンセンサが無ければ自動で消える
+    # Fan(),        # ファン回転数
     Battery(),      # バッテリーが無ければ自動で消える
     Volume(),       # [-][M][+] ボタン、バークリックで直接指定、ホイール可
     Player(),       # playerctl が無ければ自動で消える。クリックで再生/停止
-    Apt(),          # 更新可能パッケージ数 (10 分ごと)
+    # Apt(),        # 更新可能パッケージ数 (10 分ごと)
 ]
 
 
