@@ -1087,26 +1087,41 @@ class Player(Monitor):
 class Ime(Monitor):
     """IME の状態 (fcitx5/fcitx/ibus)。クリックでオンオフ切替 (fcitx のみ)。"""
     height = 24
+    CANDS = ("fcitx5-remote", "fcitx-remote")
 
     def __init__(self):
-        self.cmd = next((c for c in ("fcitx5-remote", "fcitx-remote")
-                         if shutil.which(c)), None)
-        self.ibus = shutil.which("ibus") if not self.cmd else None
-        self.available = bool(self.cmd or self.ibus)
+        self.cands = [c for c in self.CANDS if shutil.which(c)]
+        self.ibus = shutil.which("ibus")
+        self.available = bool(self.cands or self.ibus)
+        self.cmd = None  # 実際に応答したコマンド。毎 tick 探し直す
         self.active = False
         self.name = ""
 
+    def _probe(self):
+        """応答する fcitx-remote 系コマンドを探す。バイナリがあっても本体が
+        動いていない (v4/v5 混在や起動順) ことがあるので毎回確かめる。"""
+        for c in self.cands:
+            r = subprocess.run([c], capture_output=True, text=True)
+            if r.returncode == 0 and r.stdout.strip() in ("0", "1", "2"):
+                return c, r.stdout.strip()
+        return None, ""
+
     def tick(self):
+        self.cmd, st = self._probe()
         if self.cmd:
-            st = subprocess.run([self.cmd], capture_output=True, text=True) \
-                .stdout.strip()
             self.active = st == "2"
+            # fcitx4 の fcitx-remote に -n は無い → 空なら on/off 表示に落とす
             self.name = subprocess.run([self.cmd, "-n"], capture_output=True,
                                        text=True).stdout.strip()
-        else:
+            if not self.name:
+                self.name = "closed" if st == "0" else \
+                            ("on" if self.active else "off")
+        elif self.ibus:
             self.name = subprocess.run(["ibus", "engine"], capture_output=True,
                                        text=True).stdout.strip()
-            self.active = not self.name.startswith("xkb:")
+            self.active = bool(self.name) and not self.name.startswith("xkb:")
+        else:
+            self.name = ""
 
     def on_click(self, ev):
         if ev.button != 1 or not self.cmd:
@@ -1117,7 +1132,9 @@ class Ime(Monitor):
 
     def draw(self, cr, w, h):
         draw_text(cr, "IME", 2, 10, size=8, color=COL_LABEL)
-        name = re.sub(r"^(keyboard-|xkb:)", "", self.name)[:8] or "?"
+        # 応答が無いときの "n/a" は IME 本体が動いていないか、DBus セッションに
+        # つながっていない (autostart の起動順など) ことを示す
+        name = re.sub(r"^(keyboard-|xkb:)", "", self.name)[:8] or "n/a"
         draw_text(cr, name, 0, 10, size=8, bold=self.active,
                   color=COL_GRAPH if self.active else COL_LABEL,
                   align="right", width=w - 2)
