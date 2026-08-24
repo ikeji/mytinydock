@@ -42,8 +42,9 @@ import cairo
 
 EDGE = "right"        # ドックする画面端: "left" or "right"
 ALIGN = "top"         # 端の中での位置: "top" / "center" / "bottom"
-MONITOR = None        # 表示するモニタ: None=プライマリ, 数値=インデックス,
-                      # 文字列=xrandr の出力名 ("HDMI-A-0" など)
+MONITOR = "edge"      # 表示するモニタ: "edge"=EDGE 側で一番端にあるモニタ,
+                      # None=プライマリ, 数値=インデックス,
+                      # それ以外の文字列=xrandr の出力名 ("HDMI-A-0" など)
 WIDTH = 64            # パネルの幅 (px)。wmdock/dockapp の伝統に合わせて 64
 UPDATE_MS = 1000      # 更新間隔 (ミリ秒)
 RESERVE_SPACE = True  # True なら WM に領域を予約し、他のウィンドウが重ならない
@@ -1185,6 +1186,11 @@ def target_monitor():
     n = display.get_n_monitors()
     if isinstance(MONITOR, int):
         return display.get_monitor(min(MONITOR, n - 1))
+    if MONITOR == "edge":
+        mons = [display.get_monitor(i) for i in range(n)]
+        if EDGE == "left":
+            return min(mons, key=lambda m: m.get_geometry().x)
+        return max(mons, key=lambda m: m.get_geometry().x + m.get_geometry().width)
     if isinstance(MONITOR, str):
         for i in range(n):
             m = display.get_monitor(i)

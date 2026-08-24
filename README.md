@@ -41,8 +41,9 @@ sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-3.0 x11-utils
 
 - `EDGE` — ドックする画面端 (`"left"` / `"right"`)
 - `ALIGN` — 端の中での位置 (`"top"` / `"center"` / `"bottom"`)
-- `MONITOR` — 表示先モニタ。`None` でプライマリ、数値でインデックス、
-  `"HDMI-A-0"` のような xrandr 出力名でも指定できる
+- `MONITOR` — 表示先モニタ。`"edge"` (デフォルト) は `EDGE` 側で一番端にある
+  モニタ、`None` はプライマリ、数値でインデックス、`"HDMI-A-0"` のような
+  xrandr 出力名でも指定できる
 - `WIDTH` — パネル幅 (px)
 - `UPDATE_MS` — 更新間隔
 - `RESERVE_SPACE` — False にすると領域予約せず、他のウィンドウと重なれるようになる
