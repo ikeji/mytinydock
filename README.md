@@ -41,6 +41,8 @@ sudo apt install python3-gi gir1.2-gtk-3.0 x11-utils
 
 - `EDGE` — ドックする画面端 (`"left"` / `"right"`)
 - `ALIGN` — 端の中での位置 (`"top"` / `"center"` / `"bottom"`)
+- `MONITOR` — 表示先モニタ。`None` でプライマリ、数値でインデックス、
+  `"HDMI-A-0"` のような xrandr 出力名でも指定できる
 - `WIDTH` — パネル幅 (px)
 - `UPDATE_MS` — 更新間隔
 - `RESERVE_SPACE` — False にすると領域予約せず、他のウィンドウと重なれるようになる
@@ -157,5 +159,9 @@ Player は `playerctl`、Ime は `fcitx5-remote` / `fcitx-remote` / `ibus` が�
 ## 既知の制限
 
 - X11 専用(Wayland では領域予約と位置指定が効かない)
-- 領域予約はプライマリモニタ基準。マルチモニタでプライマリが端にない構成だと
-  予約領域がずれることがある(その場合は `RESERVE_SPACE = False` にする)
+- マルチモニタでは `MONITOR` で選んだモニタの端に置き、領域予約 (strut) は
+  ルート画面端からの距離に換算する。表示先の端がルート画面の端でない場合
+  (右側に別モニタがあるのに左のモニタの右端に置くなど)、strut の帯が隣の
+  モニタにもかかるので、WM によっては隣のモニタの領域も削られる。
+  気になる場合は `RESERVE_SPACE = False` にするか、ルート画面の端になる
+  モニタ/EDGE を選ぶ

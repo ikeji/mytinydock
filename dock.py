@@ -42,6 +42,8 @@ import cairo
 
 EDGE = "right"        # ドックする画面端: "left" or "right"
 ALIGN = "top"         # 端の中での位置: "top" / "center" / "bottom"
+MONITOR = None        # 表示するモニタ: None=プライマリ, 数値=インデックス,
+                      # 文字列=xrandr の出力名 ("HDMI-A-0" など)
 WIDTH = 64            # パネルの幅 (px)。wmdock/dockapp の伝統に合わせて 64
 UPDATE_MS = 1000      # 更新間隔 (ミリ秒)
 RESERVE_SPACE = True  # True なら WM に領域を予約し、他のウィンドウが重ならない
@@ -1177,6 +1179,41 @@ class Apt(Monitor):
 # ウィンドウ本体
 # ======================================================================
 
+def target_monitor():
+    """MONITOR 設定に従って表示先の Gdk.Monitor を返す。"""
+    display = Gdk.Display.get_default()
+    n = display.get_n_monitors()
+    if isinstance(MONITOR, int):
+        return display.get_monitor(min(MONITOR, n - 1))
+    if isinstance(MONITOR, str):
+        for i in range(n):
+            m = display.get_monitor(i)
+            if MONITOR in (m.get_model() or "", monitor_output_name(m)):
+                return m
+        print("pydock: モニタ %r が見つからないのでプライマリを使用" % MONITOR)
+    return display.get_primary_monitor() or display.get_monitor(0)
+
+
+def monitor_output_name(mon):
+    """Gdk.Monitor に対応する xrandr の出力名 (X11 のみ)。"""
+    try:
+        from gi.repository import GdkX11
+        return GdkX11.X11Monitor.get_output_name(mon) or ""
+    except Exception:
+        return ""
+
+
+def screen_extent():
+    """全モニタを合わせたルートウィンドウの大きさ (幅, 高さ)。"""
+    display = Gdk.Display.get_default()
+    w = h = 0
+    for i in range(display.get_n_monitors()):
+        g = display.get_monitor(i).get_geometry()
+        w = max(w, g.x + g.width)
+        h = max(h, g.y + g.height)
+    return w, h
+
+
 class Dock(Gtk.Window):
     def __init__(self, monitors):
         super().__init__(title="pydock")
@@ -1229,9 +1266,7 @@ class Dock(Gtk.Window):
         """画面の縦幅に収まらないパネルは中途半端に切れないよう丸ごと非表示に。
         並び順は保ちつつ、入るものは後ろからでも詰める (背の高いパネルが
         入らなくても、その後ろの小さいパネルは表示される)。"""
-        display = Gdk.Display.get_default()
-        gmon = display.get_primary_monitor() or display.get_monitor(0)
-        avail_h = gmon.get_geometry().height
+        avail_h = target_monitor().get_geometry().height
         used = 4  # 上下マージン
         fits, dropped = [], []
         for m in self.monitors:
@@ -1273,9 +1308,7 @@ class Dock(Gtk.Window):
 
     # ---- 配置と領域予約 ----
     def on_map(self, *_):
-        display = Gdk.Display.get_default()
-        mon = display.get_primary_monitor() or display.get_monitor(0)
-        geo = mon.get_geometry()
+        geo = target_monitor().get_geometry()
         _, win_h = self.get_size()
 
         x = geo.x if EDGE == "left" else geo.x + geo.width - WIDTH
@@ -1288,26 +1321,29 @@ class Dock(Gtk.Window):
         self.move(x, y)
 
         if RESERVE_SPACE:
-            self.set_strut(y, y + win_h)
+            self.set_strut(geo, y, y + win_h)
         if KEEP_BELOW:
             # xmonad は dock を管理外にしてスタッキングを変更しないため、
             # ヒントだけでなく実際に XLowerWindow で最背面へ下げておく
             self.get_window().lower()
         return False
 
-    def set_strut(self, y0, y1):
+    def set_strut(self, geo, y0, y1):
         """_NET_WM_STRUT(_PARTIAL) をセットして WM に画面端の領域を予約させる。
-        Gdk 経由の property 設定は PyGObject で扱いづらいので xprop に頼る。"""
+        Gdk 経由の property 設定は PyGObject で扱いづらいので xprop に頼る。
+        strut はルートウィンドウの端からの距離なので、表示先モニタがルートの
+        端に無いマルチモニタ構成では、その隙間の分を足す。"""
         try:
             xid = self.get_window().get_xid()
         except AttributeError:
             return  # X11 バックエンドでない (Wayland など)
         # [left, right, top, bottom, l_y0, l_y1, r_y0, r_y1, t_x0, t_x1, b_x0, b_x1]
         part = [0] * 12
+        root_w, _ = screen_extent()
         if EDGE == "left":
-            part[0], part[4], part[5] = WIDTH, y0, y1
+            part[0], part[4], part[5] = geo.x + WIDTH, y0, y1
         else:
-            part[1], part[6], part[7] = WIDTH, y0, y1
+            part[1], part[6], part[7] = root_w - (geo.x + geo.width) + WIDTH, y0, y1
         for name, vals in (("_NET_WM_STRUT_PARTIAL", part),
                            ("_NET_WM_STRUT", part[:4])):
             r = subprocess.run(
