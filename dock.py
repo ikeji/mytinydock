@@ -1188,19 +1188,10 @@ def target_monitor():
     if isinstance(MONITOR, str):
         for i in range(n):
             m = display.get_monitor(i)
-            if MONITOR in (m.get_model() or "", monitor_output_name(m)):
+            if m.get_model() == MONITOR:   # X11 では xrandr の出力名が入る
                 return m
         print("pydock: モニタ %r が見つからないのでプライマリを使用" % MONITOR)
     return display.get_primary_monitor() or display.get_monitor(0)
-
-
-def monitor_output_name(mon):
-    """Gdk.Monitor に対応する xrandr の出力名 (X11 のみ)。"""
-    try:
-        from gi.repository import GdkX11
-        return GdkX11.X11Monitor.get_output_name(mon) or ""
-    except Exception:
-        return ""
 
 
 def screen_extent():
