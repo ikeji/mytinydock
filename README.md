@@ -11,7 +11,7 @@ APT 更新数を表示する。
 ## 必要なもの
 
 ```sh
-sudo apt install python3-gi gir1.2-gtk-3.0 x11-utils
+sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-3.0 x11-utils
 ```
 
 - python3-gi + GTK3 (PyGObject)
