@@ -35,6 +35,29 @@ sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-3.0 x11-utils
 
 ## カスタマイズ
 
+`dock.py` を直接編集するほか、`~/.dockrc.py` があれば起動時に読み込まれる。
+中身は dock.py の名前空間で実行される普通の Python で、設定変数の再代入・
+`MONITORS` の組み換え・モニタの自作がそのまま書ける:
+
+```python
+# ~/.dockrc.py
+EDGE = "left"
+PING_TARGET = "192.168.1.1"
+
+class Procs(Monitor):
+    height = 24
+    def tick(self):
+        self.n = sum(1 for d in os.listdir("/proc") if d.isdigit())
+    def draw(self, cr, w, h):
+        draw_text(cr, "PRC", 2, 10, size=8, color=COL_LABEL)
+        draw_text(cr, str(getattr(self, "n", 0)), 0, 10, size=9,
+                  align="right", width=w - 2)
+
+MONITORS = [Clock(), Cpu(), Mem(), Procs(), Volume()]
+```
+
+読み込みでエラーになった場合はコンソールに表示してデフォルト設定で続行する。
+
 ### 位置・サイズ・色
 
 `dock.py` 先頭の「設定」ブロックを編集する:

@@ -1390,32 +1390,51 @@ class Dock(Gtk.Window):
 # ======================================================================
 
 MONITORS = [
-    Clock(),        # 時刻 / 日付 / ISO 週 / 稼働時間
-    Moon(),         # 月齢
-    Workspaces(),   # xmonad 側で EwmhDesktops (ewmh) が必要
+    Clock(),  # 時刻 / 日付 / ISO 週 / 稼働時間
+    Moon(),  # 月齢
+    Workspaces(),  # xmonad 側で EwmhDesktops (ewmh) が必要
     # Ime(),        # IME 状態。クリックで切替
     Cpu(),
     # CpuFreq(),    # CPU クロック
     # Top(),        # CPU を一番使っているプロセス
     Mem(),
-    Net(),          # Net("eth0") のように指定も可
-    Wifi(),         # 無線 IF が無ければ自動で消える
-    Ping(),         # 宛先は PING_TARGET (Ping("192.168.1.1") でも可)
-    Tailscale(),    # tailscale コマンドが無ければ自動で消える
-    GlobalIp(),     # 10 分ごとに api.ipify.org へ問い合わせ
+    Net(),  # Net("eth0") のように指定も可
+    Wifi(),  # 無線 IF が無ければ自動で消える
+    # Ping(),         # 宛先は PING_TARGET (Ping("192.168.1.1") でも可)
+    # Tailscale(),    # tailscale コマンドが無ければ自動で消える
+    # GlobalIp(),     # 10 分ごとに api.ipify.org へ問い合わせ
     Disk(),
     *[Fs(p) for p in FS_PATHS],
-    Temp(),         # センサが無ければ自動で消える
+    Temp(),  # センサが無ければ自動で消える
     # Fan(),        # ファン回転数
-    Battery(),      # バッテリーが無ければ自動で消える
-    Volume(),       # [-][M][+] ボタン、バークリックで直接指定、ホイール可
-    Player(),       # playerctl が無ければ自動で消える。クリックで再生/停止
+    Battery(),  # バッテリーが無ければ自動で消える
+    Volume(),  # [-][M][+] ボタン、バークリックで直接指定、ホイール可
+    Player(),  # playerctl が無ければ自動で消える。クリックで再生/停止
     # Apt(),        # 更新可能パッケージ数 (10 分ごと)
 ]
 
 
+RC_PATH = os.path.expanduser("~/.dockrc.py")
+
+
+def load_rc():
+    """~/.dockrc.py があれば、このモジュールの名前空間で実行して設定を上書きする。
+    EDGE = "left" のような再代入、MONITORS の組み換え、Monitor サブクラスの
+    定義がそのまま書ける。エラー時は表示してデフォルト設定で続行する。"""
+    if not os.path.exists(RC_PATH):
+        return
+    try:
+        exec(compile(open(RC_PATH).read(), RC_PATH, "exec"), globals())
+    except Exception:
+        import traceback
+        print("pydock: %s の読み込みに失敗 (デフォルト設定で続行):" % RC_PATH,
+              flush=True)
+        traceback.print_exc()
+
+
 def main():
     signal.signal(signal.SIGINT, signal.SIG_DFL)  # Ctrl-C で終了できるように
+    load_rc()
     win = Dock(MONITORS)
     win.show_all()
     Gtk.main()
