@@ -46,6 +46,9 @@ MONITOR = "edge"      # 表示するモニタ: "edge"=EDGE 側で一番端にあ
                       # None=プライマリ, 数値=インデックス,
                       # それ以外の文字列=xrandr の出力名 ("HDMI-A-0" など)
 WIDTH = 64            # パネルの幅 (px)。wmdock/dockapp の伝統に合わせて 64
+SCALE = 1             # 拡大率。高 DPI の小型パネルなら 2 や 3 に (1.5 なども可)
+OVERFLOW = "hide"     # 画面の縦幅に収まらないとき: "hide"=収まらないパネルを非表示,
+                      # "wrap"=列を増やして横に並べる
 UPDATE_MS = 1000      # 更新間隔 (ミリ秒)
 RESERVE_SPACE = True  # True なら WM に領域を予約し、他のウィンドウが重ならない
 KEEP_BELOW = True     # True なら自分を最背面に下げる。xmonad などは dock を管理外に
@@ -1215,7 +1218,7 @@ class Dock(Gtk.Window):
     def __init__(self, monitors):
         super().__init__(title="pydock")
         self.monitors = [m for m in monitors if m.available]
-        self._drop_overflow()
+        columns = self._layout()
 
         # wmdock 風: 枠なし、タスクバーに出ない、全ワークスペースに表示、DOCK 扱い
         self.set_decorated(False)
@@ -1227,23 +1230,28 @@ class Dock(Gtk.Window):
         if KEEP_BELOW:
             self.set_keep_below(True)  # EWMH を解釈する WM 向けのヒント
 
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        box.set_margin_top(2)
-        box.set_margin_bottom(2)
-        box.set_margin_start(2)
-        box.set_margin_end(2)
-        self.add(box)
+        gap = int(round(2 * SCALE))
+        hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=gap)
+        hbox.set_margin_top(gap)
+        hbox.set_margin_bottom(gap)
+        hbox.set_margin_start(gap)
+        hbox.set_margin_end(gap)
+        self.add(hbox)
 
-        for m in self.monitors:
-            area = Gtk.DrawingArea()
-            area.set_size_request(WIDTH - 4, m.height)
-            area.add_events(Gdk.EventMask.BUTTON_PRESS_MASK |
-                            Gdk.EventMask.SCROLL_MASK |
-                            Gdk.EventMask.SMOOTH_SCROLL_MASK)
-            area.connect("draw", self.on_draw_panel, m)
-            area.connect("button-press-event", self.on_panel_button, m)
-            area.connect("scroll-event", self.on_panel_scroll, m)
-            box.pack_start(area, False, False, 0)
+        for col in columns:
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=gap)
+            hbox.pack_start(box, False, False, 0)
+            for m in col:
+                area = Gtk.DrawingArea()
+                area.set_size_request(int(round((WIDTH - 4) * SCALE)),
+                                      int(round(m.height * SCALE)))
+                area.add_events(Gdk.EventMask.BUTTON_PRESS_MASK |
+                                Gdk.EventMask.SCROLL_MASK |
+                                Gdk.EventMask.SMOOTH_SCROLL_MASK)
+                area.connect("draw", self.on_draw_panel, m)
+                area.connect("button-press-event", self.on_panel_button, m)
+                area.connect("scroll-event", self.on_panel_scroll, m)
+                box.pack_start(area, False, False, 0)
 
         # 背景色は CSS で指定
         css = Gtk.CssProvider()
@@ -1259,25 +1267,35 @@ class Dock(Gtk.Window):
         GLib.timeout_add(UPDATE_MS, self.on_tick)
         self.on_tick()
 
-    def _drop_overflow(self):
-        """画面の縦幅に収まらないパネルは中途半端に切れないよう丸ごと非表示に。
-        並び順は保ちつつ、入るものは後ろからでも詰める (背の高いパネルが
-        入らなくても、その後ろの小さいパネルは表示される)。"""
+    def _layout(self):
+        """パネルを列に割り付ける。画面の縦幅に収まらない分は、
+        OVERFLOW="wrap" なら次の列へ折り返し、"hide" なら丸ごと非表示にする
+        (中途半端に切れることはない)。"hide" は並び順を保ちつつ、後ろの
+        小さいパネルでも入るものは詰める。"""
         avail_h = target_monitor().get_geometry().height
-        used = 4  # 上下マージン
-        fits, dropped = [], []
+        gap = int(round(2 * SCALE))
+        cols, dropped = [], []
+        col, used = [], gap * 2  # 上下マージン
         for m in self.monitors:
-            need = m.height + (2 if fits else 0)  # パネル間 spacing
+            ph = int(round(m.height * SCALE))
+            need = ph + (gap if col else 0)
             if used + need <= avail_h:
-                fits.append(m)
+                col.append(m)
                 used += need
+            elif OVERFLOW == "wrap" and gap * 2 + ph <= avail_h:
+                if col:
+                    cols.append(col)
+                col, used = [m], gap * 2 + ph
             else:
                 dropped.append(type(m).__name__)
+        if col:
+            cols.append(col)
         if dropped:
             print("pydock: 画面 (縦%dpx) に収まらないため非表示: %s\n"
                   "        (MONITORS の並びで前にあるものが優先されます)"
                   % (avail_h, ", ".join(dropped)))
-        self.monitors = fits
+        self.monitors = [m for c in cols for m in c]
+        return cols or [[]]
 
     # ---- 更新 ----
     def on_tick(self):
@@ -1292,8 +1310,9 @@ class Dock(Gtk.Window):
 
     # ---- 描画 ----
     def on_draw_panel(self, area, cr, monitor):
-        w = area.get_allocated_width()
-        h = area.get_allocated_height()
+        cr.scale(SCALE, SCALE)  # 以降は論理座標 (SCALE=1 相当) で描く
+        w = int(area.get_allocated_width() / SCALE)
+        h = int(area.get_allocated_height() / SCALE)
         cr.set_source_rgb(*COL_PANEL)
         cr.rectangle(0, 0, w, h)
         cr.fill()
@@ -1306,9 +1325,9 @@ class Dock(Gtk.Window):
     # ---- 配置と領域予約 ----
     def on_map(self, *_):
         geo = target_monitor().get_geometry()
-        _, win_h = self.get_size()
+        win_w, win_h = self.get_size()
 
-        x = geo.x if EDGE == "left" else geo.x + geo.width - WIDTH
+        x = geo.x if EDGE == "left" else geo.x + geo.width - win_w
         if ALIGN == "top":
             y = geo.y
         elif ALIGN == "bottom":
@@ -1318,14 +1337,14 @@ class Dock(Gtk.Window):
         self.move(x, y)
 
         if RESERVE_SPACE:
-            self.set_strut(geo, y, y + win_h)
+            self.set_strut(geo, y, y + win_h, win_w)
         if KEEP_BELOW:
             # xmonad は dock を管理外にしてスタッキングを変更しないため、
             # ヒントだけでなく実際に XLowerWindow で最背面へ下げておく
             self.get_window().lower()
         return False
 
-    def set_strut(self, geo, y0, y1):
+    def set_strut(self, geo, y0, y1, win_w):
         """_NET_WM_STRUT(_PARTIAL) をセットして WM に画面端の領域を予約させる。
         Gdk 経由の property 設定は PyGObject で扱いづらいので xprop に頼る。
         strut はルートウィンドウの端からの距離なので、表示先モニタがルートの
@@ -1338,9 +1357,10 @@ class Dock(Gtk.Window):
         part = [0] * 12
         root_w, _ = screen_extent()
         if EDGE == "left":
-            part[0], part[4], part[5] = geo.x + WIDTH, y0, y1
+            part[0], part[4], part[5] = geo.x + win_w, y0, y1
         else:
-            part[1], part[6], part[7] = root_w - (geo.x + geo.width) + WIDTH, y0, y1
+            part[1], part[6], part[7] = (root_w - (geo.x + geo.width) + win_w,
+                                         y0, y1)
         for name, vals in (("_NET_WM_STRUT_PARTIAL", part),
                            ("_NET_WM_STRUT", part[:4])):
             r = subprocess.run(
@@ -1354,6 +1374,8 @@ class Dock(Gtk.Window):
 
     # ---- パネルごとのマウス操作 ----
     def on_panel_button(self, _area, ev, monitor):
+        ev.x /= SCALE  # モニタ側は論理座標で判定する
+        ev.y /= SCALE
         if monitor.on_click(ev):
             self.queue_draw()
             return True
