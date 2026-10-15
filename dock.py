@@ -13,6 +13,7 @@ pydock — X11 の画面端に常駐する gkrellm 風ステータスモニタ(w
 """
 
 import array
+import calendar
 import collections
 import ctypes
 import ctypes.util
@@ -313,6 +314,71 @@ class Clock(Monitor):
         mm = rem // 60
         s = f"up {d}d{hh:02}:{mm:02}" if d else f"up {hh:02}:{mm:02}"
         draw_text(cr, s, 0, 51, size=7, color=COL_LABEL, align="center", width=w)
+
+
+class Calendar(Monitor):
+    """今月のミニカレンダ。今日を反転表示、土日は色を変える。
+    ホイールで前後の月へ移動、クリックで今月に戻る。"""
+    FIRST_WEEKDAY = 0  # 週の始まり: 0=月曜 (ISO 週と同じ), 6=日曜
+    ROW_H = 7
+    height = 12 + ROW_H * 7 + 2  # 見出し + 曜日行 + 6 週 (月によらず高さ固定)
+    MONTHS = ("JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+              "JUL", "AUG", "SEP", "OCT", "NOV", "DEC")
+
+    def __init__(self):
+        self.offset = 0  # 今月からのずれ (月数)
+
+    def on_scroll(self, direction):
+        self.offset -= direction  # 上で前の月、下で次の月
+        return True
+
+    def on_click(self, ev):
+        if ev.button != 1:
+            return False
+        self.offset = 0
+        return True
+
+    def draw(self, cr, w, h):
+        t = time.localtime()
+        year, mon = divmod(t.tm_year * 12 + t.tm_mon - 1 + self.offset, 12)
+        mon += 1
+        # 今月以外を表示中は見出しの色で分かるようにする
+        draw_text(cr, f"{self.MONTHS[mon - 1]} {year}", 0, 10, size=8, bold=True,
+                  color=COL_TEXT if self.offset == 0 else COL_GRAPH2,
+                  align="center", width=w)
+        cw = (w - 4) / 7
+        base = 12 + self.ROW_H
+        for c in range(7):
+            wd = (self.FIRST_WEEKDAY + c) % 7
+            draw_text(cr, "MTWTFSS"[wd], 2 + c * cw, base - 1, size=6,
+                      color=COL_GRAPH2 if wd >= 5 else COL_LABEL,
+                      align="center", width=cw)
+        weeks = calendar.Calendar(self.FIRST_WEEKDAY).monthdayscalendar(year, mon)
+        for r, week in enumerate(weeks):
+            y = base + (r + 1) * self.ROW_H
+            for c, day in enumerate(week):
+                if not day:
+                    continue
+                x = 2 + c * cw
+                wd = (self.FIRST_WEEKDAY + c) % 7
+                if self.offset == 0 and day == t.tm_mday:
+                    cr.set_source_rgb(*COL_BAR)
+                    cr.rectangle(x, y - self.ROW_H + 1, cw, self.ROW_H)
+                    cr.fill()
+                    self._day(cr, day, x, y - 1, cw, COL_GRAPH_BG, bold=True)
+                else:
+                    self._day(cr, day, x, y - 1, cw,
+                              COL_GRAPH2 if wd >= 5 else COL_TEXT)
+
+    def _day(self, cr, day, x, y, cw, color, bold=False):
+        """日付の数字。幅 64px に 7 列だと 2 桁が隣とくっつくので横に詰めて描く。"""
+        k = 0.8
+        cr.save()
+        cr.translate(x, y)
+        cr.scale(k, 1)
+        draw_text(cr, str(day), 0, 0, size=6, color=color, bold=bold,
+                  align="center", width=cw / k)
+        cr.restore()
 
 
 class Moon(Monitor):
@@ -1413,6 +1479,7 @@ class Dock(Gtk.Window):
 
 MONITORS = [
     Clock(),  # 時刻 / 日付 / ISO 週 / 稼働時間
+    Calendar(),  # 今月のカレンダ。ホイールで月移動、クリックで今月
     Moon(),  # 月齢
     Workspaces(),  # xmonad 側で EwmhDesktops (ewmh) が必要
     # Ime(),        # IME 状態。クリックで切替

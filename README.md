@@ -1,7 +1,7 @@
 # pydock
 
 X11 の画面端に常駐する gkrellm 風ステータスモニタ。wmdock 風の幅 64px の縦長パネルで、
-時計 (ISO 週付き)・月齢・xmonad ワークスペース・CPU (使用率/クロック/Top プロセス)・
+時計 (ISO 週付き)・ミニカレンダ・月齢・xmonad ワークスペース・CPU (使用率/クロック/Top プロセス)・
 メモリ・ネットワーク・Wi-Fi・Ping・Tailscale・グローバル IP・ディスク I/O・
 ファイルシステム・温度・ファン・バッテリー・音量・メディアプレイヤー・IME・
 APT 更新数を表示する。
@@ -29,6 +29,7 @@ sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-3.0 x11-utils
 - 音量パネル: [-][M][+] ボタン、バーをクリックでその位置の音量に設定、
   ホイールで上下、それ以外の場所のクリックでミュート切替
 - メディアパネル: クリックで再生/一時停止
+- カレンダパネル: ホイールで前後の月へ、クリックで今月に戻る
 - IME パネル: クリックでオンオフ切替 (fcitx のみ)
 - X セッション開始時に自動起動したい場合は `~/.xsessionrc` や WM の autostart に
   `~/work/desktop/dock/dock.py &` を追加する
@@ -148,6 +149,12 @@ main = xmonad $ ewmh $ docks $ def { ... }
 
 PipeWire の `wpctl` があればそれを、無ければ PulseAudio の `pactl` を使う。
 どちらも無ければ非表示。
+
+### Calendar
+
+今月のカレンダを表示し、今日を反転表示する。週は月曜始まり (ISO 週と同じ)。
+日曜始まりにしたければ `Calendar.FIRST_WEEKDAY = 6` を設定する。
+月によらず 6 週分の高さを確保するので、月が変わってもレイアウトは動かない。
 
 ### Moon (月齢)
 
