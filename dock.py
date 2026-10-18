@@ -1482,24 +1482,24 @@ MONITORS = [
     Calendar(),  # 今月のカレンダ。ホイールで月移動、クリックで今月
     Moon(),  # 月齢
     Workspaces(),  # xmonad 側で EwmhDesktops (ewmh) が必要
-    # Ime(),        # IME 状態。クリックで切替
+    Ime(),        # IME 状態。クリックで切替
     Cpu(),
-    # CpuFreq(),    # CPU クロック
-    # Top(),        # CPU を一番使っているプロセス
+    CpuFreq(),    # CPU クロック
+    Top(),        # CPU を一番使っているプロセス
     Mem(),
     Net(),  # Net("eth0") のように指定も可
     Wifi(),  # 無線 IF が無ければ自動で消える
-    # Ping(),         # 宛先は PING_TARGET (Ping("192.168.1.1") でも可)
-    # Tailscale(),    # tailscale コマンドが無ければ自動で消える
-    # GlobalIp(),     # 10 分ごとに api.ipify.org へ問い合わせ
+    Ping(),         # 宛先は PING_TARGET (Ping("192.168.1.1") でも可)
+    Tailscale(),    # tailscale コマンドが無ければ自動で消える
+    GlobalIp(),     # 10 分ごとに api.ipify.org へ問い合わせ
     Disk(),
     *[Fs(p) for p in FS_PATHS],
     Temp(),  # センサが無ければ自動で消える
-    # Fan(),        # ファン回転数
+    Fan(),        # ファン回転数
     Battery(),  # バッテリーが無ければ自動で消える
     Volume(),  # [-][M][+] ボタン、バークリックで直接指定、ホイール可
     Player(),  # playerctl が無ければ自動で消える。クリックで再生/停止
-    # Apt(),        # 更新可能パッケージ数 (10 分ごと)
+    Apt(),        # 更新可能パッケージ数 (10 分ごと)
 ]
 
 
